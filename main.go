@@ -56,14 +56,14 @@ instant, fully local analysis.`,
 	root.Flags().StringVarP(&flagFormat, "format", "f", "terminal", "output format: terminal, json, html")
 	root.Flags().StringVarP(&flagOutputFile, "output", "o", "", "write report to file instead of stdout")
 	root.Flags().BoolVar(&flagEnableLLM, "llm", false, "enable LLM enrichment (adds explanations and refactoring examples)")
-	root.Flags().BoolVar(&flagDeepAnalysis, "deep", false, "deep LLM analysis — sends stripped package skeletons, one call per package (requires --llm)")
-	root.Flags().IntVar(&flagDeepTimeout, "deep-timeout", 90, "per-package LLM timeout for deep analysis in seconds")
+	root.Flags().BoolVar(&flagDeepAnalysis, "deep", false, "deep LLM analysis — sends stripped package skeletons, one call per package")
+	root.Flags().IntVar(&flagDeepTimeout, "deep-timeout", 300, "per-package LLM timeout for deep analysis in seconds (local models need more time)")
 	root.Flags().StringVar(&flagLLMProvider, "llm-provider", "ollama", "LLM provider: ollama, openai")
-	root.Flags().StringVar(&flagLLMModel, "llm-model", "llama3", "LLM model name")
+	root.Flags().StringVar(&flagLLMModel, "llm-model", "qwen2.5-coder:7b", "LLM model name")
 	root.Flags().StringVar(&flagLLMBaseURL, "llm-base-url", "", "Ollama base URL (default: http://localhost:11434)")
 	root.Flags().StringVar(&flagLLMAPIKey, "llm-api-key", "", "OpenAI API key (or set OPENAI_API_KEY)")
 	root.Flags().IntVar(&flagMinScore, "min-score", 0, "exit 1 if maintainability score is below this threshold (CI mode)")
-	root.Flags().IntVar(&flagTimeout, "timeout", 60, "static analysis + enrichment timeout in seconds")
+	root.Flags().IntVar(&flagTimeout, "timeout", 600, "static analysis + enrichment timeout in seconds")
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -111,6 +111,12 @@ func run(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// --deep implies --llm
+	if flagDeepAnalysis && !flagEnableLLM {
+		fmt.Fprintln(os.Stderr, "gorview: --deep requires --llm; enabling LLM automatically")
+		flagEnableLLM = true
+	}
+
 	// LLM enrichment + deep analysis (optional)
 	if flagEnableLLM {
 		provider, err := buildProvider()
@@ -125,7 +131,7 @@ func run(_ *cobra.Command, args []string) error {
 				if analyser, ok := provider.(llm.DeepAnalyser); ok {
 					sketches := buildGoSketches(goFiles)
 					sketches = append(sketches, buildPySketches(pyFiles)...)
-					allFindings = runDeepAnalysis(analyser, sketches, allFindings)
+					allFindings = runDeepAnalysis(ctx, analyser, sketches, allFindings)
 				} else {
 					fmt.Fprintf(os.Stderr, "gorview: deep analysis not supported by provider %q\n", flagLLMProvider)
 				}
@@ -239,14 +245,20 @@ func buildPySketches(files []python.ParsedFile) []core.PackageSketch {
 }
 
 // runDeepAnalysis sends each package sketch to the LLM analyser.
-// Each sketch gets its own timeout context so one slow package cannot
-// block the others, and the global context is checked between packages
-// to respect ctrl-c / --timeout cancellation.
-func runDeepAnalysis(analyser llm.DeepAnalyser, sketches []core.PackageSketch, existing []core.Finding) []core.Finding {
+// Each sketch gets its own timeout so one slow package cannot block others.
+// The parent context is checked between packages to respect Ctrl-C.
+func runDeepAnalysis(parent context.Context, analyser llm.DeepAnalyser, sketches []core.PackageSketch, existing []core.Finding) []core.Finding {
 	all := existing
 	timeout := time.Duration(flagDeepTimeout) * time.Second
 	for _, sketch := range sketches {
-		pkgCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		select {
+		case <-parent.Done():
+			fmt.Fprintln(os.Stderr, "gorview: deep analysis cancelled")
+			return all
+		default:
+		}
+		pkgCtx, cancel := context.WithTimeout(parent, timeout)
+		fmt.Fprintf(os.Stderr, "[gorview] deep: analysing %s ...\n", sketch.Dir)
 		found, err := analyser.AnalysePackage(pkgCtx, sketch, all)
 		cancel()
 		if err != nil {
@@ -268,11 +280,7 @@ func buildProvider() (llm.Provider, error) {
 		if apiKey == "" {
 			return nil, fmt.Errorf("OpenAI API key required (--llm-api-key or OPENAI_API_KEY)")
 		}
-		model := flagLLMModel
-		if model == "llama3" {
-			model = "gpt-4o-mini"
-		}
-		return openaiLLM.New(apiKey, model), nil
+		return openaiLLM.New(apiKey, flagLLMModel), nil
 	case "ollama":
 		return ollamaLLM.New(flagLLMBaseURL, flagLLMModel), nil
 	default:

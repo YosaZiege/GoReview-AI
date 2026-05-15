@@ -21,9 +21,9 @@ func BuildPrompt(f core.Finding) string {
 		fmt.Fprintf(&sb, "Metrics          : %s\n", metricsText(f.Metrics))
 	}
 	fmt.Fprintf(&sb, "Suggested pattern: %s\n\n", f.Pattern)
-	sb.WriteString("Respond in JSON with exactly these keys:\n")
+	sb.WriteString("CRITICAL: Output ONLY a raw JSON object — no markdown, no prose, no code fences.\n")
+	sb.WriteString("Your response must start with { and end with }.\n\n")
 	sb.WriteString(`{"explanation":"1-2 sentence diagnosis","refactor_before":"Go code ≤15 lines","refactor_after":"Go code ≤15 lines","effort":"Faible|Moyen|Élevé"}`)
-	sb.WriteString("\nOnly output valid JSON, nothing else.")
 	return sb.String()
 }
 
