@@ -27,7 +27,7 @@ import (
 	openaiLLM "github.com/yourorg/gorview/llm/openai"
 	"github.com/yourorg/gorview/output"
 )
-// TODO : json
+// Final modifs
 var (
 	flagFormat       string
 	flagOutputFile   string
